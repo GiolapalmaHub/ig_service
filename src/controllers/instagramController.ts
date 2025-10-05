@@ -1,79 +1,134 @@
+// src/controllers/instagramController.ts
 import type { Request, Response } from 'express';
-// Assicurati che il percorso dell'import sia corretto
 import { instagramService } from '../services/instagramService';
+import { createSecureState, verifySecureState } from '../utils/stateHelper';
 
 export const redirectToInstagramAuth = (req: Request, res: Response) => {
-  // Determine state from query or use a default page
-  const stateParam = req.query['state'] || 'dashboard';
-  if (Array.isArray(stateParam)) {
-    res.status(400).send('Invalid state parameter');
-    return;
+  try {
+    const rawUserId = req.query['userId'];
+    const rawPage = req.query['state'];
+
+    if (!rawUserId || Array.isArray(rawUserId) || typeof rawUserId !== 'string') {
+      return res.status(400).json({ error: 'userId richiesto' });
+    }
+
+    const userId = rawUserId;
+
+    let page: string;
+    if (rawPage === undefined) {
+      page = 'dashboard';
+    } else if (Array.isArray(rawPage) || typeof rawPage !== 'string') {
+      return res.status(400).json({ error: 'state parameter invalido' });
+    } else {
+      page = rawPage;
+    }
+
+    // Crea state con expiry di 10 minuti (default)
+    const { state, nonce } = createSecureState(userId, page);
+    
+    // Salva nonce in cookie sicuro
+    res.cookie('oauth_nonce', nonce, {
+      httpOnly: true,
+      signed: true,
+      maxAge: 10 * 60 * 1000, // 10 minuti
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/api/v1/instagram',
+    });
+    
+    const host = req.get('host');
+    const protocol = req.protocol;
+    const redirectUri = `${protocol}://${host}/api/v1/instagram/auth/callback`;
+    const authUrl = instagramService.getInstagramAuthUrl(redirectUri, state);
+    
+    console.log('🚀 OAuth avviato - User:', userId);
+    res.redirect(authUrl);
+    
+  } catch (error) {
+    console.error('❌ Errore OAuth start:', error);
+    res.status(500).json({
+      error: 'Errore avvio OAuth',
+      message: error instanceof Error ? error.message : 'Unknown',
+    });
   }
-  const state = stateParam as string;
-
-  // Build the redirect URI that Instagram will call back to
-  const host = req.get('host') || 'localhost';
-  const protocol = req.protocol || 'https';
-  const redirectUri = new URL('/api/instagram/callback', `${protocol}://${host}`).toString();
-
-  const authUrl = instagramService.getInstagramAuthUrl(redirectUri, state);
-  res.redirect(authUrl);
 };
+
 export const handleIntagramCallback = async (req: Request, res: Response) => {
   try {
-    // Logica per gestire il callback di Instagram
-    console.log('Ricevuto callback di Instagram:', req.query);
-    const cose = req.query['code'];
-    console.log('code:', cose);
-    if (!cose) {
-      throw new Error('Codice di autorizzazione mancante nel callback di Instagram.');
-    }
-
-    // pagina dell'url di redirect presi dalla query
-    const redirectPage = req.query['state'] || 'dashboard';
-    if (Array.isArray(redirectPage)) {
-      throw new Error('Parametro di stato non valido.');
-    }
-    console.log('redirectPage:', redirectPage);
+    const code = req.query['code'];
+    const receivedState = req.query['state'];
+    const error = req.query['error'];
     
-    
-    // TODO: associa l'utente Instagram con il tuo sistema utilizzando il codice ricevuto
-    const ivotUserId = 'id-' //! da fare
-
-    const result =  await instagramService.handleAuthCallback(cose as string, ivotUserId);
-    if (!result) {
-      throw new Error('Errore durante la gestione del callback di Instagram.');
+    // Utente ha negato l'autorizzazione
+    if (error) {
+      throw new Error(`OAuth error: ${error}`);
     }
-    console.log('Risultato della gestione del callback di Instagram:', result);
-    // Redirect to frontend; stop further processing after redirect
-
-    const redirectURL = new URL(`/${redirectPage}`, `https://${req.get('host')}`);
-    redirectURL.searchParams.append('token', result.accessToken);
-    redirectURL.searchParams.append('userId', ivotUserId);
-    redirectURL.searchParams.append('accountId', result.userId);
+    
+    if (!code || Array.isArray(code) || typeof code !== 'string') {
+      throw new Error('Authorization code mancante');
+    }
+    
+    if (!receivedState || Array.isArray(receivedState) || typeof receivedState !== 'string') {
+      throw new Error('State parameter mancante');
+    }
+    
+    // Recupera nonce dal cookie
+    const storedNonce = req.signedCookies.oauth_nonce;
+    if (!storedNonce || typeof storedNonce !== 'string') {
+      throw new Error('Nonce mancante - possibile CSRF');
+    }
+    
+    // Verifica state con nonce
+    const verification = verifySecureState(receivedState, storedNonce);
+    
+    if (!verification.valid) {
+      console.error('❌ State invalido:', verification.reason);
+      throw new Error(`Verifica fallita: ${verification.reason}`);
+    }
+    
+    console.log('✅ State verificato - User:', verification.data!.userId);
+    
+    // Rimuovi nonce (one-time use)
+    res.clearCookie('oauth_nonce', {
+      path: '/api/v1/instagram',
+    });
+    
+    // Scambia code per token
+    const result = await instagramService.handleAuthCallback(
+      code,
+      verification.data!.userId
+    );
+    
+    // Redirect a IVOT con successo
+    const ivotUrl = process.env.IVOT_FRONTEND_URL || 'https://ivot.com';
+    const redirectURL = new URL(`/${verification.data!.page}`, ivotUrl);
     redirectURL.searchParams.append('instagram', 'success');
-
-
+    redirectURL.searchParams.append('accountId', result.userId);
+    
+    console.log('🎉 OAuth completato - IG Account:', result.userId);
     res.redirect(redirectURL.toString());
-    return;
+    
   } catch (error) {
-    console.error('Errore nel callback di Instagram:', error);
-    // Redirect to frontend with error; stop further processing after redirect
-    const redirectURL = new URL(`/error`, `https://${req.get('host')}`);
-    redirectURL.searchParams.append('instagram', 'error');
-    res.redirect(redirectURL.toString());
-    return;
+    console.error('❌ Errore callback:', error);
+    
+    const ivotUrl = process.env.IVOT_FRONTEND_URL || 'https://ivot.com';
+    const errorURL = new URL('/dashboard', ivotUrl);
+    errorURL.searchParams.append('instagram', 'error');
+    errorURL.searchParams.append(
+      'message',
+      error instanceof Error ? error.message : 'Errore sconosciuto'
+    );
+    
+    res.redirect(errorURL.toString());
   }
-   
 };
 
 export const verifyWebhook = (req: Request, res: Response) => {
   try {
-    // Ho rinominato la funzione nel service per coerenza, vedi sotto
     const challenge = instagramService.verifyInstagramWebhook(req);
     res.status(200).send(challenge);
   } catch (error) {
-    console.error("Errore nella verifica del webhook:", error);
-    res.status(403).send('Verifica fallita.');
+    console.error('Errore verifica webhook:', error);
+    res.status(403).send('Verifica fallita');
   }
 };
