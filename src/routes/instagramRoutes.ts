@@ -1,20 +1,29 @@
 import { Router } from 'express';
-import { verifyWebhook, handleIntagramCallback,redirectToInstagramAuth } from '../controllers/instagramController.js';
-import { verifyInternalApiKey } from '../middleware/authMiddleware.js';
+import { startAuth, handleCallback, healthCheck } from '../controllers/instagramController';
 
 const router = Router();
 
-// router.get('/auth/callback', handleInstagramCallback);
-// router.post('/publish', verifyInternalApiKey, publishMedia);
+/**
+ * GET /auth/url
+ * Inizia il flusso OAuth
+ * 
+ * Query params:
+ * - userId: ID utente del sistema client
+ * - callbackUrl: URL dove reindirizzare dopo OAuth
+ * - state (optional): stato da preservare
+ */
+router.get('/url', startAuth);
 
-// Endpoint per la verifica del webhook di Instagram
-router.get('/webhooks', verifyWebhook);
+/**
+ * GET /auth/callback
+ * Callback da Instagram OAuth
+ */
+router.get('/callback', handleCallback);
 
-// for callback by meta
-router.get('/auth/callback', handleIntagramCallback);
-
-// for getting the url to redirect the user to instagram auth
-router.get('/auth/url', redirectToInstagramAuth)
-
+/**
+ * GET /health
+ * Health check
+ */
+router.get('/health', healthCheck);
 
 export default router;
