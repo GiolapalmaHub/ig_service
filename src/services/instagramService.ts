@@ -7,6 +7,8 @@ const GRAPH_BASE = process.env.GRAPH_INSTAGRAM_BASE_URL || 'https://graph.instag
 const API_VERSION = process.env.GRAPH_INSTAGRAM_VERSION || 'v23.0';
 
 interface CreateContainerParams {
+  location_id?: string;
+  cover_url?: string;
   image_url?: string;
   video_url?: string;
   caption?: string;
@@ -21,7 +23,10 @@ interface PublishResponse {
   id: string; // Instagram Media ID del post pubblicato
 }
 
-
+interface ContainerStatus {
+  status_code: 'EXPIRED' | 'ERROR' | 'FINISHED' | 'IN_PROGRESS' | 'PUBLISHED';
+  error_message?: string;
+}
 
 interface TokenResponse {
   access_token: string;
@@ -160,6 +165,30 @@ class InstagramService {
     return response.data;
   }
 
+  async refreshLongLivedToken(accessToken: string): Promise<LongLivedTokenResponse> {
+    try {
+      const response = await axios.get<LongLivedTokenResponse>(
+        `${GRAPH_INSTAGRAM_BASE_URL}/refresh_access_token`,
+        {
+          params: {
+            grant_type: 'ig_refresh_token',
+            access_token: accessToken,
+          },
+        }
+      );
+
+      if (!response.data.access_token) {
+        throw new Error('Token refresh fallito');
+      }
+
+      console.log('✅ Token refreshed, valido per altri 60 giorni');
+      return response.data;
+    } catch (error) {
+      this.handleInstagramError(error, 'Errore refresh token');
+      throw error;
+    }
+  }
+
   /**
    * Ottieni informazioni utente Instagram
    */
@@ -173,8 +202,11 @@ class InstagramService {
 
     return response.data;
   }
+  // ==========================================
+  // CONTENT PUBLISHING
+  // ==========================================
 
-    /**
+  /**
    * Step 1: Crea un media container
    */
   async createMediaContainer(params: CreateContainerParams): Promise<string> {
@@ -182,23 +214,34 @@ class InstagramService {
     
     const endpoint = `${GRAPH_BASE}/${API_VERSION}/${instagram_account_id}/media`;
     
-    console.log('Creating media container for account:', instagram_account_id);
-    
-    const response = await axios.post(endpoint, null, {
-      params: {
-        ...mediaParams,
-        access_token,
-      }
+    console.log('📦 Creating media container:', {
+      accountId: instagram_account_id,
+      mediaType: mediaParams.media_type || 'IMAGE'
     });
     
-    if (!response.data.id) {
-      throw new Error('Container ID non ricevuto da Instagram');
+    try {
+      const response = await axios.post(endpoint, null, {
+        params: {
+          ...mediaParams,
+          access_token,
+        }
+      });
+      
+      if (!response.data.id) {
+        throw new Error('Container ID non ricevuto da Instagram');
+      }
+      
+      console.log('✅ Container creato:', response.data.id);
+      return response.data.id;
+    } catch (error) {
+      this.handleInstagramError(error, 'Errore creazione container');
+      throw error;
     }
-    
-    console.log('Container creato:', response.data.id);
-    return response.data.id; // Container ID
   }
 
+  /**
+   * Step 2: Pubblica il container
+   */
   async publishMedia(
     instagram_account_id: string,
     container_id: string,
@@ -206,59 +249,111 @@ class InstagramService {
   ): Promise<PublishResponse> {
     const endpoint = `${GRAPH_BASE}/${API_VERSION}/${instagram_account_id}/media_publish`;
     
-    console.log('Publishing container:', container_id);
+    console.log('📤 Publishing container:', container_id);
     
-    const response = await axios.post(endpoint, null, {
-      params: {
-        creation_id: container_id,
-        access_token,
+    try {
+      const response = await axios.post(endpoint, null, {
+        params: {
+          creation_id: container_id,
+          access_token,
+        }
+      });
+      
+      if (!response.data.id) {
+        throw new Error('Media ID non ricevuto dopo pubblicazione');
       }
-    });
-    
-    if (!response.data.id) {
-      throw new Error('Media ID non ricevuto dopo pubblicazione');
+      
+      console.log('✅ Media pubblicato con ID:', response.data.id);
+      return response.data;
+    } catch (error) {
+      this.handleInstagramError(error, 'Errore pubblicazione media');
+      throw error;
     }
-    
-    console.log('Media pubblicato con ID:', response.data.id);
-    return response.data;
   }
+
   /**
-   * Verifica status del container prima di pubblicare
+   * Verifica status del container
    */
   async checkContainerStatus(
     container_id: string,
     access_token: string
-  ): Promise<string> {
+  ): Promise<ContainerStatus> {
     const endpoint = `${GRAPH_BASE}/${API_VERSION}/${container_id}`;
     
-    const response = await axios.get(endpoint, {
-      params: {
-        fields: 'status_code',
-        access_token,
-      }
-    });
-    
-    return response.data.status_code; // FINISHED, IN_PROGRESS, ERROR, EXPIRED
+    try {
+      const response = await axios.get(endpoint, {
+        params: {
+          fields: 'status_code',
+          access_token,
+        }
+      });
+      
+      return response.data;
+    } catch (error) {
+      this.handleInstagramError(error, 'Errore verifica status container');
+      throw error;
+    }
   }
-  
+
   /**
-   * Helper: Pubblica una singola immagine (completo)
+   * Helper: Aspetta che il container sia pronto
+   */
+  private async waitForContainerReady(
+    container_id: string,
+    access_token: string,
+    maxAttempts: number = 10,
+    delayMs: number = 2000
+  ): Promise<void> {
+    for (let i = 0; i < maxAttempts; i++) {
+      const status = await this.checkContainerStatus(container_id, access_token);
+      
+      console.log(`📊 Container status: ${status.status_code} (attempt ${i + 1}/${maxAttempts})`);
+      
+      if (status.status_code === 'FINISHED') {
+        console.log('✅ Container pronto per pubblicazione');
+        return;
+      }
+      
+      if (status.status_code === 'ERROR') {
+        throw new Error(`Container error: ${status.error_message || 'Unknown error'}`);
+      }
+      
+      if (status.status_code === 'EXPIRED') {
+        throw new Error('Container scaduto (non pubblicato entro 24 ore)');
+      }
+      
+      // Aspetta prima del prossimo tentativo
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    
+    throw new Error(`Timeout: container non pronto dopo ${maxAttempts * delayMs / 1000} secondi`);
+  }
+
+  /**
+   * Helper: Pubblica una singola immagine (flow completo)
    */
   async publishSingleImage(
     instagram_account_id: string,
     image_url: string,
     caption: string,
-    access_token: string
+    access_token: string,
+    options?: {
+      location_id?: string;
+      user_tags?: Array<{ username: string; x?: number; y?: number }>;
+    }
   ): Promise<string> {
+    console.log('🖼️ Publishing single image');
+    
     // Step 1: Crea container
     const containerId = await this.createMediaContainer({
       instagram_account_id,
       image_url,
       caption,
       access_token,
+      ...options
     });
     
-    // Step 2: Aspetta che sia pronto (opzionale ma consigliato)
+    // Step 2: Aspetta che sia pronto
     await this.waitForContainerReady(containerId, access_token);
     
     // Step 3: Pubblica
@@ -270,34 +365,188 @@ class InstagramService {
     
     return result.id;
   }
-  
+
   /**
-   * Helper: Aspetta che il container sia pronto
+   * Helper: Pubblica un video (flow completo)
    */
-  private async waitForContainerReady(
-    container_id: string,
+  async publishVideo(
+    instagram_account_id: string,
+    video_url: string,
+    caption: string,
     access_token: string,
-    maxAttempts: number = 10
-  ): Promise<void> {
-    for (let i = 0; i < maxAttempts; i++) {
-      const status = await this.checkContainerStatus(container_id, access_token);
-      
-      if (status === 'FINISHED') {
-        console.log('Container pronto per pubblicazione');
-        return;
-      }
-      
-      if (status === 'ERROR' || status === 'EXPIRED') {
-        throw new Error(`Container in stato ${status}`);
-      }
-      
-      console.log(`Container status: ${status}, attendo...`);
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Aspetta 2 secondi
+    options?: {
+      cover_url?: string;
+      media_type?: 'VIDEO' | 'REELS';
+      location_id?: string;
     }
+  ): Promise<string> {
+    console.log('🎥 Publishing video');
     
-    throw new Error('Timeout: container non pronto dopo 20 secondi');
+    // Step 1: Crea container
+    const containerId = await this.createMediaContainer({
+      instagram_account_id,
+      video_url,
+      caption,
+      media_type: options?.media_type || 'VIDEO',
+      cover_url: options?.cover_url,
+      location_id: options?.location_id,
+      access_token,
+    });
+    
+    // Step 2: Aspetta processing (video richiede più tempo)
+    console.log('⏳ Video in processing, questo può richiedere alcuni minuti...');
+    await this.waitForContainerReady(containerId, access_token, 30, 5000);
+    
+    // Step 3: Pubblica
+    const result = await this.publishMedia(
+      instagram_account_id,
+      containerId,
+      access_token
+    );
+    
+    return result.id;
   }
 
+  /**
+   * Helper: Pubblica un carousel (post multipli)
+   */
+  async publishCarousel(
+    instagram_account_id: string,
+    items: Array<{ image_url?: string; video_url?: string }>,
+    caption: string,
+    access_token: string
+  ): Promise<string> {
+    console.log('🎠 Publishing carousel with', items.length, 'items');
+    
+    if (items.length < 2 || items.length > 10) {
+      throw new Error('Carousel deve contenere tra 2 e 10 items');
+    }
+    
+    // Step 1: Crea container per ogni item
+    const childrenIds: string[] = [];
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      console.log(`📦 Creating container ${i + 1}/${items.length}`);
+      
+      const childId = await this.createMediaContainer({
+        instagram_account_id,
+        image_url: item.image_url,
+        video_url: item.video_url,
+        is_carousel_item: true,
+        access_token,
+      });
+      
+      childrenIds.push(childId);
+    }
+    
+    // Step 2: Crea carousel container
+    console.log('📦 Creating carousel container');
+    const carouselId = await this.createMediaContainer({
+      instagram_account_id,
+      media_type: 'CAROUSEL',
+      caption,
+      children: childrenIds,
+      access_token,
+    });
+    
+    // Step 3: Aspetta che sia pronto
+    await this.waitForContainerReady(carouselId, access_token);
+    
+    // Step 4: Pubblica
+    const result = await this.publishMedia(
+      instagram_account_id,
+      carouselId,
+      access_token
+    );
+    
+    return result.id;
+  }
+
+  // ==========================================
+  // RATE LIMITING & INSIGHTS
+  // ==========================================
+
+  /**
+   * Verifica il rate limit di pubblicazione (100 post/24h)
+   */
+  async checkPublishingLimit(
+    instagram_account_id: string,
+    access_token: string
+  ): Promise<{ quota_usage: number; config: { quota_total: number; quota_duration: number } }> {
+    const endpoint = `${GRAPH_BASE}/${API_VERSION}/${instagram_account_id}/content_publishing_limit`;
+    
+    try {
+      const response = await axios.get(endpoint, {
+        params: {
+          fields: 'quota_usage,config',
+          access_token,
+        }
+      });
+      
+      console.log('📊 Publishing rate limit:', {
+        used: response.data.data[0].quota_usage,
+        total: response.data.data[0].config.quota_total,
+        remaining: response.data.data[0].config.quota_total - response.data.data[0].quota_usage
+      });
+      
+      return response.data.data[0];
+    } catch (error) {
+      this.handleInstagramError(error, 'Errore verifica rate limit');
+      throw error;
+    }
+  }
+
+  // ==========================================
+  // ERROR HANDLING
+  // ==========================================
+
+  /**
+   * Gestisce errori specifici di Instagram API
+   */
+  private handleInstagramError(error: any, context: string): void {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const data = error.response?.data;
+      
+      console.error(`❌ ${context}:`, {
+        status,
+        error: data?.error,
+        message: data?.error?.message,
+        type: data?.error?.type,
+        code: data?.error?.code,
+        error_subcode: data?.error?.error_subcode
+      });
+
+      // Errori comuni
+      if (status === 400) {
+        if (data?.error?.code === 100) {
+          throw new Error('Parametri richiesta non validi');
+        }
+        if (data?.error?.error_subcode === 2207026) {
+          throw new Error('Media URL non accessibile o formato non supportato');
+        }
+      }
+      
+      if (status === 401) {
+        throw new Error('Access token non valido o scaduto');
+      }
+      
+      if (status === 403) {
+        throw new Error('Permessi insufficienti per questa operazione');
+      }
+      
+      if (status === 429) {
+        throw new Error('Rate limit superato, riprova più tardi');
+      }
+      
+      if (status === 500) {
+        throw new Error('Errore interno di Instagram, riprova più tardi');
+      }
+    }
+    
+    console.error(`❌ ${context}:`, error);
+  }
 }
 
 export const instagramService = new InstagramService();
