@@ -1,8 +1,4 @@
-import 'dotenv/config'; // side-effect: carica .env PRIMA di qualsiasi altro import
-
-// poi il resto
-console.log('🔍 Environment variables loaded:');
-
+import 'dotenv/config';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -20,10 +16,18 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser(process.env.COOKIE_SECRET || 'your-cookie-secret'));
+app.use(cookieParser(process.env.STATE_SECRET_KEY));
 
-// Routes
-app.use('/auth', router);
+// Routes - CAMBIA QUI
+app.use('/api/v1/instagram/auth', router);
+
+app.use(cors({
+  origin: [
+    'http://localhost:5173',  // Il tuo frontend React locale
+    'https://angelina-soigna-euphoniously.ngrok-free.dev'  // Se host frontend su ngrok
+  ],
+  credentials: true  // Permetti cookies (per OAuth state)
+}));
 
 // Error handling
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {

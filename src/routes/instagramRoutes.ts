@@ -25,4 +25,19 @@ router.get('/callback', handleCallback);
  */
 router.get('/health', healthCheck);
 
+
+// for challenging:
+// Aggiungi questo
+router.get('/webhooks', (req, res) => {
+  const challenge = req.query['hub.challenge'];
+  const token = req.query['hub.verify_token'];
+  
+  if (token === process.env.VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.status(403).send('Token non valido');
+  }
+});
+
+
 export default router;
