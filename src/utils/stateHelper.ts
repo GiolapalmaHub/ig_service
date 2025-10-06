@@ -2,11 +2,13 @@ import crypto from 'crypto';
 
 const SECRET_KEY = process.env.STATE_SECRET_KEY;
 
+console.log(process.env)
+
 if (!SECRET_KEY) {
   throw new Error('❌ STATE_SECRET_KEY non configurato in .env');
 }
 
-if (SECRET_KEY.length < 32) {
+if (SECRET_KEY.length <= 32) {
   throw new Error('❌ STATE_SECRET_KEY deve essere almeno 32 caratteri');
 }
 
@@ -64,7 +66,7 @@ export function createSecureState(
 
 export function verifySecureState(
   state: string,
-  storedNonce: string // ✅ RICHIEDE NONCE SALVATO
+  storedNonce: string
 ): VerifyStateResult {
   if (!state || state.trim() === '') {
     return { valid: false, reason: 'state è richiesto' };

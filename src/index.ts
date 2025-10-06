@@ -1,10 +1,11 @@
+import dotenv from 'dotenv';
+dotenv.config();
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import router from './routes/instagramRoutes';
+import router from './routes/instagramRoutes.js';
 
-dotenv.config();
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;

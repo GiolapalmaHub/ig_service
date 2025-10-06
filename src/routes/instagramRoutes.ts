@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { startAuth, handleCallback, healthCheck } from '../controllers/instagramController';
-
+import { startAuth, handleCallback, healthCheck } from '../controllers/instagramController.js';
 const router = Router();
 
 /**

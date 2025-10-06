@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import { instagramService } from '../services/instagramService';
-import { createSecureState, verifySecureState } from '../utils/stateHelper';
+import { instagramService } from '../services/instagramService.js';
+import { createSecureState, verifySecureState } from '../utils/stateHelper.js';
 
 /**
  * GET /auth/url
