@@ -2,8 +2,6 @@ import crypto from 'crypto';
 
 const SECRET_KEY = process.env.STATE_SECRET_KEY;
 
-console.log(process.env)
-
 if (!SECRET_KEY) {
   throw new Error('❌ STATE_SECRET_KEY non configurato in .env');
 }

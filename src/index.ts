@@ -1,5 +1,13 @@
 import dotenv from 'dotenv';
 dotenv.config();
+
+
+console.log('🔍 Environment variables loaded:');
+console.log('STATE_SECRET_KEY:', process.env.STATE_SECRET_KEY ? '✅ Presente' : '❌ Mancante');
+console.log('INSTAGRAM_APP_ID:', process.env.INSTAGRAM_APP_ID ? '✅ Presente' : '❌ Mancante');
+console.log('PORT:', process.env.PORT);
+
+
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
