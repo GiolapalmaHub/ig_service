@@ -102,14 +102,82 @@ export const handleCallback = async (req: Request, res: Response) => {
   }
 };
 
-/**
- * GET /health
- * Health check endpoint
- */
-export const healthCheck = (_req: Request, res: Response) => {
-  res.json({
-    status: 'ok',
-    service: 'instagram-oauth-microservice',
-    timestamp: new Date().toISOString(),
-  });
-};
+export const publishImg = async (req: Request, res: Response) =>{
+  try{
+    const { instagram_account_id, access_token, image_url, caption } = req.body;
+
+    if (!instagram_account_id|| !access_token || !image_url){
+      return res.status(400).json({
+        error: 'Parametri mancanti',
+        required: ['instagram_account_id', 'access_token', 'image_url']
+      }); 
+    }
+    console.log('publishing image to Instagram account', instagram_account_id);
+
+    const mediaId = await instagramService.publishSingleImage(
+      instagram_account_id,
+      image_url, 
+      caption || '',
+      access_token
+    );
+
+    res.status(200).json({
+      success: true,
+      media_id: mediaId,
+      message: 'Post pubblicato con successo su Instagram'
+    });
+  } catch (error) {
+    console.error('Errore pubblicazione:', error);
+    res.status(500).json({
+      error: 'Errore durante la pubblicazione',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  };
+}
+
+export const publishVideo = async (req: Request, res: Response) => {
+  try {
+    const { instagram_account_id, access_token, video_url, caption } = req.body;
+    
+    if (!instagram_account_id || !access_token || !video_url) {
+      return res.status(400).json({
+        error: 'Parametri mancanti',
+        required: ['instagram_account_id', 'access_token', 'video_url']
+      });
+    }
+    
+    // Step 1: Crea container video
+    const containerId = await instagramService.createMediaContainer({
+      instagram_account_id,
+      video_url,
+      caption: caption || '',
+      media_type: 'VIDEO',
+      access_token,
+    });
+    
+    // Step 2: Aspetta che il video sia processato (può richiedere minuti)
+    console.log('Video in elaborazione, attendi...');
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Aspetta 5 secondi
+    
+    // Step 3: Pubblica
+    const result = await instagramService.publishMedia(
+      instagram_account_id,
+      containerId,
+      access_token
+    );
+    
+    res.status(200).json({
+      success: true,
+      media_id: result.id,
+      message: 'Video pubblicato con successo'
+    });
+    
+  } catch (error) {
+    console.error('Errore pubblicazione video:', error);
+    res.status(500).json({
+      error: 'Errore durante la pubblicazione video',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  };
+}
+

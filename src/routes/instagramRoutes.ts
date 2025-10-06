@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { startAuth, handleCallback, healthCheck } from '../controllers/instagramController.js';
+import { startAuth, handleCallback, publishImg, publishVideo} from '../controllers/instagramController.js';
 const router = Router();
 
 /**
@@ -23,7 +23,6 @@ router.get('/callback', handleCallback);
  * GET /health
  * Health check
  */
-router.get('/health', healthCheck);
 
 
 // for challenging:
@@ -38,6 +37,9 @@ router.get('/webhooks', (req, res) => {
     res.status(403).send('Token non valido');
   }
 });
+
+router.post('/publish/image', publishImg);
+router.post('/publish/video', publishVideo);
 
 
 export default router;
