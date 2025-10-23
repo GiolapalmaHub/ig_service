@@ -46,11 +46,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============================================
-// ROUTES
-// ============================================
-
-// Health check globale
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok',
@@ -68,7 +63,7 @@ app.use('/api/v1/instagram/auth', router);
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    service: 'IVOT Instagram OAuth Microservice',
+    service: 'Instagram OAuth Microservice',
     version: '1.0.0',
     status: 'running',
     endpoints: {
