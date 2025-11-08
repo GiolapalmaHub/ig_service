@@ -3,23 +3,35 @@ import crypto from 'crypto';
 import type { Request, Response } from 'express';
 import { 
   startAuth, 
-  handleCallback} from '../controllers/instagramController.js';
-import { 
+  handleCallback,
   publishImage, 
-  publishVideo ,
+  publishVideo,
   publishCarousel,
   refreshToken,
   checkRateLimit
 } from '../controllers/instagramController.js';
+import { processMessagingEvent, processChangeEvent } from '../utils/webhookProcessors.js';
 
 const router = Router();
 
+// ============================================
+// OAUTH ROUTES
+// ============================================
 router.get('/url', startAuth);
 router.get('/callback', handleCallback);
+
+// ============================================
+// PUBLISHING ROUTES
+// ============================================
+router.post('/publish/image', publishImage);
+router.post('/publish/video', publishVideo);
 router.post('/publish/carousel', publishCarousel);
 router.post('/refresh-token', refreshToken);
 router.get('/rate-limit', checkRateLimit);
 
+// ============================================
+// DEAUTHORIZATION & DATA DELETION (GDPR)
+// ============================================
 
 /**
  * POST /api/v1/instagram/auth/deauthorize
@@ -47,12 +59,11 @@ router.post('/deauthorize', async (req: Request, res: Response) => {
       issuedAt: new Date(data.issued_at * 1000).toISOString()
     });
 
-    // TODO: Implementare logica per rimuovere token dal DB
-    // Esempio con Supabase:
-    // await supabase
-    //   .from('instagram_accounts')
-    //   .update({ access_token: null, is_active: false })
-    //   .eq('instagram_user_id', data.user_id);
+    // TODO: Notificare IVOT per rimuovere token dal DB
+    // await IvotNotifier.notifyGenericEvent('deauthorize', 'system', {
+    //   user_id: data.user_id,
+    //   issued_at: data.issued_at
+    // });
 
     res.status(200).json({ 
       success: true,
@@ -88,10 +99,12 @@ router.post('/data-deletion', async (req: Request, res: Response) => {
 
     console.log('👤 Richiesta cancellazione per:', data.user_id);
 
-    // TODO: Implementare logica cancellazione dati
-    // 1. Salvare richiesta in DB
-    // 2. Schedulare cancellazione (max 90 giorni)
-    // 3. Eliminare tutti i dati utente
+    // TODO: Notificare IVOT per schedulare cancellazione dati
+    // await IvotNotifier.notifyGenericEvent('data_deletion_request', 'system', {
+    //   user_id: data.user_id,
+    //   confirmation_code: confirmationCode,
+    //   issued_at: data.issued_at
+    // });
 
     const statusUrl = `${process.env.IVOT_FRONTEND_URL}/data-deletion-status?code=${confirmationCode}`;
 
@@ -111,6 +124,7 @@ router.post('/data-deletion', async (req: Request, res: Response) => {
 // ============================================
 // WEBHOOKS
 // ============================================
+
 /**
  * GET /api/v1/instagram/auth/webhooks
  * Verifica webhook (chiamato da Meta durante setup)
@@ -123,14 +137,18 @@ router.get('/webhooks', (req: Request, res: Response) => {
   console.log('🔍 Webhook verification request:', {
     mode,
     token: token ? 'presente' : 'mancante',
-    challenge
+    challenge: challenge ? 'presente' : 'mancante'
   });
 
   if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-    console.log('✅ Webhook verified');
+    console.log('✅ Webhook verified successfully');
     res.status(200).send(challenge);
   } else {
-    console.error('❌ Webhook verification failed');
+    console.error('❌ Webhook verification failed:', {
+      expectedToken: process.env.VERIFY_TOKEN ? 'configured' : 'MISSING',
+      receivedToken: token,
+      mode
+    });
     res.status(403).send('Forbidden');
   }
 });
@@ -140,81 +158,66 @@ router.get('/webhooks', (req: Request, res: Response) => {
  * Riceve notifiche webhook da Instagram
  */
 router.post('/webhooks', async (req: Request, res: Response) => {
-  // Rispondi immediatamente (Instagram ha timeout 20 secondi)
+  // ✅ STEP 1: Rispondi SUBITO a Instagram (timeout 20 secondi)
   res.sendStatus(200);
 
   try {
-    // Verifica signature per sicurezza
+    // ✅ STEP 2: Verifica firma HMAC per sicurezza
     const signature = req.headers['x-hub-signature-256'] as string;
     
     if (!verifyWebhookSignature(req.body, signature)) {
-      console.error('❌ Invalid webhook signature');
+      console.error('❌ Invalid webhook signature - possibile attacco!');
       return;
     }
 
-    console.log('📬 Webhook received:', {
+    console.log('📬 Webhook received & verified:', {
       timestamp: new Date().toISOString(),
       object: req.body.object,
       entries: req.body.entry?.length || 0
     });
 
-    // Log payload completo per debug
-    console.log('Payload:', JSON.stringify(req.body, null, 2));
-
-    // Processa eventi
+    // ✅ STEP 3: Processa eventi in background (non bloccare risposta)
     const { object, entry } = req.body;
 
     if (!entry || entry.length === 0) {
-      console.warn('⚠️ Webhook senza entry');
+      console.warn('⚠️ Webhook senza entry - ignorato');
       return;
     }
 
+    // Process each entry
     for (const item of entry) {
-      const accountId = item.id;
-      const time = item.time;
+      const instagramAccountId = item.id;
+      const webhookTime = item.time;
 
-      // Processa messaggi
-      if (item.messaging) {
+      console.log(`📱 Processing entry for account: ${instagramAccountId}`);
+
+      // ✅ Processa messaggi diretti
+      if (item.messaging && Array.isArray(item.messaging)) {
+        console.log(`   💬 Processing ${item.messaging.length} messaging event(s)`);
         for (const msg of item.messaging) {
-          await processMessagingEvent(accountId, msg);
+          await processMessagingEvent(instagramAccountId, msg, webhookTime);
         }
       }
 
-      // Processa commenti
-      if (item.changes) {
+      // ✅ Processa commenti/mentions
+      if (item.changes && Array.isArray(item.changes)) {
+        console.log(`   🔄 Processing ${item.changes.length} change event(s)`);
         for (const change of item.changes) {
-          await processChangeEvent(accountId, change);
+          await processChangeEvent(instagramAccountId, change, webhookTime);
         }
       }
     }
 
+    console.log('✅ Webhook processing completed');
+
   } catch (error) {
-    console.error('❌ Webhook processing error:', error);
+    console.error('❌ Webhook processing error:', {
+      error: error instanceof Error ? error.message : 'Unknown',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    // Non rilanciare l'errore - abbiamo già risposto 200 a Instagram
   }
 });
-
-// ============================================
-// PUBLISHING
-// ============================================
-/**
- * POST /api/v1/instagram/auth/publish/image
- * Pubblica un'immagine su Instagram
- * 
- * Body:
- * {
- *   "instagram_account_id": "17841476841102986",
- *   "access_token": "IGAAOwrd...",
- *   "image_url": "https://example.com/image.jpg",
- *   "caption": "Il mio post!"
- * }
- */
-router.post('/publish/image', publishImage);
-
-/**
- * POST /api/v1/instagram/auth/publish/video
- * Pubblica un video su Instagram
- */
-router.post('/publish/video', publishVideo);
 
 // ============================================
 // HELPER FUNCTIONS
@@ -225,120 +228,39 @@ router.post('/publish/video', publishVideo);
  */
 function verifyWebhookSignature(body: any, signature: string | undefined): boolean {
   if (!signature) {
-    console.warn('⚠️ Nessuna signature presente');
+    console.warn('⚠️ Nessuna signature presente nell\'header X-Hub-Signature-256');
+    return false;
+  }
+
+  if (!process.env.INSTAGRAM_APP_SECRET) {
+    console.error('❌ INSTAGRAM_APP_SECRET non configurato!');
     return false;
   }
 
   try {
     const payload = JSON.stringify(body);
     const expectedSignature = 'sha256=' + 
-      crypto.createHmac('sha256', process.env.INSTAGRAM_APP_SECRET!)
+      crypto.createHmac('sha256', process.env.INSTAGRAM_APP_SECRET)
             .update(payload)
             .digest('hex');
 
-    return crypto.timingSafeEqual(
+    // Usa timing-safe comparison per prevenire timing attacks
+    const isValid = crypto.timingSafeEqual(
       Buffer.from(signature),
       Buffer.from(expectedSignature)
     );
+
+    if (!isValid) {
+      console.error('❌ Signature mismatch:', {
+        received: signature.substring(0, 20) + '...',
+        expected: expectedSignature.substring(0, 20) + '...'
+      });
+    }
+
+    return isValid;
   } catch (error) {
     console.error('❌ Errore verifica signature:', error);
     return false;
-  }
-}
-
-
-/**
- * Processa eventi di messaging
- */
-async function processMessagingEvent(accountId: string, msg: any): Promise<void> {
-  console.log('💬 Messaging event:', {
-    accountId,
-    sender: msg.sender?.id,
-    recipient: msg.recipient?.id,
-    timestamp: msg.timestamp
-  });
-
-  // Message received
-  if (msg.message) {
-    console.log('📨 Message:', {
-      mid: msg.message.mid,
-      text: msg.message.text,
-      isDeleted: msg.message.is_deleted,
-      isEcho: msg.message.is_echo
-    });
-
-    // TODO: Implementare logica per gestire messaggi
-    // - Salvare in DB
-    // - Rispondere automaticamente
-    // - Notificare frontend
-  }
-
-  // Reaction
-  if (msg.reaction) {
-    console.log('❤️ Reaction:', {
-      messageId: msg.reaction.mid,
-      action: msg.reaction.action,
-      emoji: msg.reaction.emoji
-    });
-  }
-
-  // Message read
-  if (msg.read) {
-    console.log('👁️ Message read:', msg.read.mid);
-  }
-
-  // Postback (icebreaker, CTA button)
-  if (msg.postback) {
-    console.log('🔘 Postback:', {
-      title: msg.postback.title,
-      payload: msg.postback.payload
-    });
-  }
-}
-
-/**
- * Processa eventi di change (comments, mentions, etc.)
- */
-async function processChangeEvent(accountId: string, change: any): Promise<void> {
-  console.log('🔄 Change event:', {
-    accountId,
-    field: change.field
-  });
-
-  const { field, value } = change;
-
-  switch (field) {
-    case 'comments':
-    case 'live_comments':
-      console.log('💬 Comment:', {
-        commentId: value.id,
-        from: value.from?.username,
-        text: value.text,
-        mediaId: value.media?.id
-      });
-
-      // TODO: Implementare gestione commenti
-      // - Salvare in DB
-      // - Moderazione automatica
-      // - Rispondere
-      break;
-
-    case 'mentions':
-      console.log('📢 Mention:', {
-        mediaId: value.media_id,
-        commentId: value.comment_id
-      });
-
-      // TODO: Implementare gestione mentions
-      break;
-
-    case 'story_insights':
-      console.log('📊 Story insights:', value);
-      // TODO: Salvare metriche
-      break;
-
-    default:
-      console.log('❓ Unknown field:', field);
   }
 }
 

@@ -12,7 +12,7 @@ interface CreateContainerParams {
   image_url?: string;
   video_url?: string;
   caption?: string;
-  media_type?: 'IMAGE' | 'VIDEO' | 'REELS' | 'CAROUSEL';
+  media_type?: 'IMAGE' | 'REELS' | 'CAROUSEL';
   is_carousel_item?: boolean;
   children?: string[]; // Per carousel
   access_token: string;
@@ -376,7 +376,7 @@ class InstagramService {
     access_token: string,
     options?: {
       cover_url?: string;
-      media_type?: 'VIDEO' | 'REELS';
+      media_type?: 'REELS';
       location_id?: string;
     }
   ): Promise<string> {
@@ -387,7 +387,7 @@ class InstagramService {
       instagram_account_id,
       video_url,
       caption,
-      media_type: options?.media_type || 'VIDEO',
+      media_type: options?.media_type || 'REELS',
       cover_url: options?.cover_url,
       location_id: options?.location_id,
       access_token,

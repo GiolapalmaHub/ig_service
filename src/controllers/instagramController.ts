@@ -221,13 +221,13 @@ export const publishVideo = async (req: Request, res: Response) => {
       instagram_account_id,
       video_url,
       caption: caption || '',
-      media_type: 'VIDEO',
+      media_type: 'REELS',
       access_token,
     });
     
     // Step 2: Aspetta che il video sia processato
     console.log('Video in elaborazione, attendi...');
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise(resolve => setTimeout(resolve, 30000));
     
     // Step 3: Pubblica
     const result = await instagramService.publishMedia(
