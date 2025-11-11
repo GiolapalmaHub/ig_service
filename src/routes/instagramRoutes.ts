@@ -1,3 +1,5 @@
+// File: microservizio/src/routes/instagramRoutes.ts
+
 import { Router } from 'express';
 import crypto from 'crypto';
 import type { Request, Response } from 'express';
@@ -11,6 +13,8 @@ import {
   checkRateLimit
 } from '../controllers/instagramController.js';
 import { processMessagingEvent, processChangeEvent } from '../utils/webhookProcessors.js';
+import axios from 'axios';
+import { verifyInternalApiKey } from '../middleware/authMiddleware.js';
 
 const router = Router();
 
@@ -30,18 +34,107 @@ router.post('/refresh-token', refreshToken);
 router.get('/rate-limit', checkRateLimit);
 
 // ============================================
-// DEAUTHORIZATION & DATA DELETION (GDPR)
+// SEND MESSAGE (chiamato da IVOT backend)
 // ============================================
 
 /**
- * POST /api/v1/instagram/auth/deauthorize
- * Gestisce la deauthorizzazione dell'app (chiamato da Meta)
+ * POST /api/v1/instagram/send-message
+ * Invia messaggio Instagram (chiamato da IVOT backend)
  */
+router.post('/send-message', verifyInternalApiKey, async (req: Request, res: Response) => {
+  try {
+    const { instagram_account_id, recipient_id, message, access_token } = req.body;
+
+    // Validazione parametri
+    if (!instagram_account_id || !recipient_id || !message || !access_token) {
+      return res.status(400).json({
+        error: 'Parametri mancanti',
+        required: ['instagram_account_id', 'recipient_id', 'message', 'access_token']
+      });
+    }
+
+    console.log('[SEND_MESSAGE] Sending to Instagram:', {
+      account: instagram_account_id,
+      recipient: recipient_id,
+      messageLength: message.length
+    });
+
+    // Invia messaggio
+    const response = await axios.post(
+      `https://graph.instagram.com/v23.0/${instagram_account_id}/messages`,
+      {
+        recipient: { id: recipient_id },
+        message: { text: message }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${access_token}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      }
+    );
+
+    console.log('[SEND_MESSAGE] ✅ Message sent:', response.data.message_id);
+
+    res.json({
+      success: true,
+      message_id: response.data.message_id
+    });
+
+  } catch (error) {
+    console.error('[SEND_MESSAGE] ❌ Error:', error);
+    
+    if (axios.isAxiosError(error)) {
+      const fbError = error.response?.data?.error;
+      
+      if (fbError?.code === 190) {
+        return res.status(401).json({
+          error: 'TOKEN_EXPIRED',
+          message: 'Access token scaduto o invalidato',
+          facebook_error: fbError
+        });
+      }
+      
+      if (fbError?.code === 4 || fbError?.code === 32) {
+        return res.status(429).json({
+          error: 'RATE_LIMIT',
+          message: 'Rate limit raggiunto',
+          facebook_error: fbError
+        });
+      }
+
+      if (fbError?.code === 200) {
+        return res.status(403).json({
+          error: 'PERMISSION_DENIED',
+          message: 'Permessi insufficienti',
+          facebook_error: fbError
+        });
+      }
+
+      return res.status(error.response?.status || 500).json({
+        error: 'INSTAGRAM_API_ERROR',
+        message: fbError?.message || 'Errore invio messaggio',
+        facebook_error: fbError
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'INTERNAL_ERROR',
+      message: 'Errore interno del microservizio' 
+    });
+  }
+});
+
+// ============================================
+// DEAUTHORIZATION & DATA DELETION
+// ============================================
+
 router.post('/deauthorize', async (req: Request, res: Response) => {
   try {
     const { signed_request } = req.body;
     
-    console.log('📤 Deauthorize request ricevuta:', {
+    console.log('📤 Deauthorize request:', {
       timestamp: new Date().toISOString(),
       signedRequest: signed_request ? 'presente' : 'mancante'
     });
@@ -50,7 +143,6 @@ router.post('/deauthorize', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'signed_request mancante' });
     }
 
-    // Parse signed request (formato: signature.payload)
     const [signature, payload] = signed_request.split('.');
     const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf-8'));
     
@@ -58,12 +150,6 @@ router.post('/deauthorize', async (req: Request, res: Response) => {
       userId: data.user_id,
       issuedAt: new Date(data.issued_at * 1000).toISOString()
     });
-
-    // TODO: Notificare IVOT per rimuovere token dal DB
-    // await IvotNotifier.notifyGenericEvent('deauthorize', 'system', {
-    //   user_id: data.user_id,
-    //   issued_at: data.issued_at
-    // });
 
     res.status(200).json({ 
       success: true,
@@ -78,10 +164,6 @@ router.post('/deauthorize', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/instagram/auth/data-deletion
- * Gestisce richieste cancellazione dati (GDPR compliance)
- */
 router.post('/data-deletion', async (req: Request, res: Response) => {
   try {
     const { signed_request } = req.body;
@@ -98,13 +180,6 @@ router.post('/data-deletion', async (req: Request, res: Response) => {
     const confirmationCode = `IVOT_DEL_${Date.now()}_${data.user_id}`;
 
     console.log('👤 Richiesta cancellazione per:', data.user_id);
-
-    // TODO: Notificare IVOT per schedulare cancellazione dati
-    // await IvotNotifier.notifyGenericEvent('data_deletion_request', 'system', {
-    //   user_id: data.user_id,
-    //   confirmation_code: confirmationCode,
-    //   issued_at: data.issued_at
-    // });
 
     const statusUrl = `${process.env.IVOT_FRONTEND_URL}/data-deletion-status?code=${confirmationCode}`;
 
@@ -137,18 +212,14 @@ router.get('/webhooks', (req: Request, res: Response) => {
   console.log('🔍 Webhook verification request:', {
     mode,
     token: token ? 'presente' : 'mancante',
-    challenge: challenge ? 'presente' : 'mancante'
+    challenge
   });
 
   if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-    console.log('✅ Webhook verified successfully');
+    console.log('✅ Webhook verified');
     res.status(200).send(challenge);
   } else {
-    console.error('❌ Webhook verification failed:', {
-      expectedToken: process.env.VERIFY_TOKEN ? 'configured' : 'MISSING',
-      receivedToken: token,
-      mode
-    });
+    console.error('❌ Webhook verification failed');
     res.status(403).send('Forbidden');
   }
 });
@@ -158,29 +229,45 @@ router.get('/webhooks', (req: Request, res: Response) => {
  * Riceve notifiche webhook da Instagram
  */
 router.post('/webhooks', async (req: Request, res: Response) => {
-  // ✅ STEP 1: Rispondi SUBITO a Instagram (timeout 20 secondi)
+  console.log('\n');
+  console.log('═══════════════════════════════════════════════════════');
+  console.log('[WEBHOOK] 📥 NEW REQUEST RECEIVED');
+  console.log('[WEBHOOK] Timestamp:', new Date().toISOString());
+  console.log('[WEBHOOK] Method:', req.method);
+  console.log('[WEBHOOK] URL:', req.url);
+  console.log('[WEBHOOK] Headers:', JSON.stringify({
+    'x-hub-signature-256': req.headers['x-hub-signature-256'],
+    'content-type': req.headers['content-type'],
+    'user-agent': req.headers['user-agent']
+  }, null, 2));
+  console.log('[WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
+  console.log('═══════════════════════════════════════════════════════');
+  
+  // ✅ STEP 1: Rispondi SUBITO (timeout 20 secondi)
   res.sendStatus(200);
 
   try {
-    // ✅ STEP 2: Verifica firma HMAC per sicurezza
-    const signature = req.headers['x-hub-signature-256'] as string;
+    // ✅ STEP 2: Verifica signature
+    console.log('[WEBHOOK] 🔒 Verifying signature...');
     
-    if (!verifyWebhookSignature(req.body, signature)) {
-      console.error('❌ Invalid webhook signature - possibile attacco!');
+    if (!verifyWebhookSignature(req)) {
+      console.error('[WEBHOOK] ❌ SIGNATURE VERIFICATION FAILED');
+      console.error('[WEBHOOK] ⚠️ Skipping webhook processing for security');
       return;
     }
+    
+    console.log('[WEBHOOK] ✅ Signature verified successfully');
 
-    console.log('📬 Webhook received & verified:', {
-      timestamp: new Date().toISOString(),
-      object: req.body.object,
-      entries: req.body.entry?.length || 0
-    });
-
-    // ✅ STEP 3: Processa eventi in background (non bloccare risposta)
+    // ✅ STEP 3: Processa eventi
     const { object, entry } = req.body;
 
+    console.log('[WEBHOOK] 📦 Processing webhook:', {
+      object,
+      entriesCount: entry?.length || 0
+    });
+
     if (!entry || entry.length === 0) {
-      console.warn('⚠️ Webhook senza entry - ignorato');
+      console.warn('[WEBHOOK] ⚠️ Webhook senza entry - ignorato');
       return;
     }
 
@@ -189,33 +276,42 @@ router.post('/webhooks', async (req: Request, res: Response) => {
       const instagramAccountId = item.id;
       const webhookTime = item.time;
 
-      console.log(`📱 Processing entry for account: ${instagramAccountId}`);
+      console.log(`[WEBHOOK] 📱 Processing entry for account: ${instagramAccountId}`);
 
-      // ✅ Processa messaggi diretti
+      // Processa messaggi
       if (item.messaging && Array.isArray(item.messaging)) {
-        console.log(`   💬 Processing ${item.messaging.length} messaging event(s)`);
+        console.log(`[WEBHOOK] 💬 Found ${item.messaging.length} messaging event(s)`);
+        
         for (const msg of item.messaging) {
+          console.log('[WEBHOOK] 📨 Processing message:', {
+            sender: msg.sender?.id,
+            recipient: msg.recipient?.id,
+            hasMessage: !!msg.message,
+            hasReaction: !!msg.reaction
+          });
+          
           await processMessagingEvent(instagramAccountId, msg, webhookTime);
         }
       }
 
-      // ✅ Processa commenti/mentions
+      // Processa commenti/mentions
       if (item.changes && Array.isArray(item.changes)) {
-        console.log(`   🔄 Processing ${item.changes.length} change event(s)`);
+        console.log(`[WEBHOOK] 🔄 Found ${item.changes.length} change event(s)`);
+        
         for (const change of item.changes) {
           await processChangeEvent(instagramAccountId, change, webhookTime);
         }
       }
     }
 
-    console.log('✅ Webhook processing completed');
+    console.log('[WEBHOOK] ✅ Webhook processing completed');
+    console.log('═══════════════════════════════════════════════════════\n');
 
   } catch (error) {
-    console.error('❌ Webhook processing error:', {
+    console.error('[WEBHOOK] ❌ Webhook processing error:', {
       error: error instanceof Error ? error.message : 'Unknown',
       stack: error instanceof Error ? error.stack : undefined
     });
-    // Non rilanciare l'errore - abbiamo già risposto 200 a Instagram
   }
 });
 
@@ -226,40 +322,52 @@ router.post('/webhooks', async (req: Request, res: Response) => {
 /**
  * Verifica la firma HMAC SHA256 dei webhook
  */
-function verifyWebhookSignature(body: any, signature: string | undefined): boolean {
+function verifyWebhookSignature(req: Request): boolean {
+  const signature = req.headers['x-hub-signature-256'] as string;
+  
   if (!signature) {
-    console.warn('⚠️ Nessuna signature presente nell\'header X-Hub-Signature-256');
-    return false;
-  }
-
-  if (!process.env.INSTAGRAM_APP_SECRET) {
-    console.error('❌ INSTAGRAM_APP_SECRET non configurato!');
+    console.warn('[WEBHOOK:VERIFY] ⚠️ Nessuna signature presente');
     return false;
   }
 
   try {
-    const payload = JSON.stringify(body);
+    // Usa raw body salvato nel middleware
+    const rawBody = (req as any).rawBody;
+    
+    if (!rawBody) {
+      console.error('[WEBHOOK:VERIFY] ❌ Raw body non disponibile');
+      return false;
+    }
+
+    console.log('[WEBHOOK:VERIFY] 🔍 Verifying signature');
+    console.log('[WEBHOOK:VERIFY]    Raw body length:', rawBody.length);
+    console.log('[WEBHOOK:VERIFY]    Received signature:', signature);
+    console.log('[WEBHOOK:VERIFY]    App secret length:', process.env.INSTAGRAM_APP_SECRET?.length);
+
+    // Calcola firma attesa
     const expectedSignature = 'sha256=' + 
-      crypto.createHmac('sha256', process.env.INSTAGRAM_APP_SECRET)
-            .update(payload)
+      crypto.createHmac('sha256', process.env.INSTAGRAM_APP_SECRET!)
+            .update(rawBody)
             .digest('hex');
 
-    // Usa timing-safe comparison per prevenire timing attacks
+    console.log('[WEBHOOK:VERIFY]    Expected signature:', expectedSignature);
+
+    // Confronto sicuro
     const isValid = crypto.timingSafeEqual(
       Buffer.from(signature),
       Buffer.from(expectedSignature)
     );
 
-    if (!isValid) {
-      console.error('❌ Signature mismatch:', {
-        received: signature.substring(0, 20) + '...',
-        expected: expectedSignature.substring(0, 20) + '...'
-      });
+    if (isValid) {
+      console.log('[WEBHOOK:VERIFY] ✅ Signature VALID');
+    } else {
+      console.error('[WEBHOOK:VERIFY] ❌ Signature INVALID');
     }
 
     return isValid;
+
   } catch (error) {
-    console.error('❌ Errore verifica signature:', error);
+    console.error('[WEBHOOK:VERIFY] ❌ Error verifying signature:', error);
     return false;
   }
 }

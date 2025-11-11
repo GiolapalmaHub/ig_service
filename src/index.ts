@@ -29,11 +29,16 @@ app.use(cors({
 // Body parsers
 app.use(express.json({ 
   limit: '10mb',
-  verify: (req: any, res, buf) => {
-    // Salva raw body per verifica signature webhook
-    req.rawBody = buf.toString('utf8');
+  verify: (req: any, res, buf, encoding) => {
+    // Salva il raw body come Buffer per la verifica della firma
+    if (req.url === '/api/v1/instagram/auth/webhooks' && req.method === 'POST') {
+      req.rawBody = buf;
+      console.log('[BODY_PARSER] Raw body saved for webhook verification');
+      console.log('[BODY_PARSER] Raw body length:', buf.length);
+    }
   }
 }));
+
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Cookie parser con secret key per signed cookies
@@ -47,7 +52,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'ok',
     service: 'ivot-instagram-service',
     timestamp: new Date().toISOString(),
@@ -114,12 +119,12 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
     method: req.method,
     timestamp: new Date().toISOString()
   });
-  
+
   // Non esporre dettagli interni in production
-  const message = process.env.NODE_ENV === 'development' 
-    ? err.message 
+  const message = process.env.NODE_ENV === 'development'
+    ? err.message
     : 'Internal server error';
-  
+
   res.status(500).json({
     error: 'Internal Server Error',
     message,
@@ -189,7 +194,7 @@ const server = app.listen(PORT, () => {
   console.log('');
   console.log('✅ Ready to handle requests');
   console.log('');
-  
+
   // Valida configurazione
   const requiredEnvVars = [
     'INSTAGRAM_APP_ID',
@@ -198,9 +203,9 @@ const server = app.listen(PORT, () => {
     'STATE_SECRET_KEY',
     'VERIFY_TOKEN'
   ];
-  
+
   const missing = requiredEnvVars.filter(key => !process.env[key]);
-  
+
   if (missing.length > 0) {
     console.warn('⚠️  Missing environment variables:', missing.join(', '));
     console.warn('   Some features may not work correctly');

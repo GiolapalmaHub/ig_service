@@ -1,332 +1,226 @@
-// ============================================
-// WEBHOOK EVENT PROCESSORS
-// Processa eventi da Instagram e li invia a IVOT
-// ============================================
+import axios from 'axios';
 
-import { IvotNotifier } from "./ivotNotifier"
+const IVOT_BACKEND_URL = process.env.IVOT_FRONTEND_URL
+const INTERNAL_API_KEY = process.env.ENCRYPTION_KEY;
+
 /**
- * Processa eventi di messaging (messaggi diretti)
+ * Processa eventi di messaging (Direct Messages)
  */
 export async function processMessagingEvent(
-  instagramAccountId: string, 
+  instagramAccountId: string,
   msg: any,
   webhookTime: number
 ): Promise<void> {
-  console.log('💬 Processing messaging event:', {
-    accountId: instagramAccountId,
-    sender: msg.sender?.id,
-    recipient: msg.recipient?.id,
-    timestamp: msg.timestamp
-  });
+  console.log('[PROCESSOR:MSG] 💬 Processing messaging event');
+  console.log('[PROCESSOR:MSG]    Account ID:', instagramAccountId);
+  console.log('[PROCESSOR:MSG]    Sender:', msg.sender?.id);
+  console.log('[PROCESSOR:MSG]    Recipient:', msg.recipient?.id);
+  console.log('[PROCESSOR:MSG]    Timestamp:', msg.timestamp);
 
-  // ==========================================
-  // 1. MESSAGE RECEIVED
-  // ==========================================
+  // Message received
   if (msg.message) {
-    console.log('📨 Message event:', {
+    console.log('[PROCESSOR:MSG] 📨 Message received:', {
       mid: msg.message.mid,
-      hasText: !!msg.message.text,
-      hasAttachments: !!msg.message.attachments,
+      text: msg.message.text,
       isDeleted: msg.message.is_deleted,
       isEcho: msg.message.is_echo,
-      isSelf: msg.message.is_self,
-      isUnsupported: msg.message.is_unsupported
+      isSelf: msg.message.is_self
     });
 
-    // Determina tipo messaggio
-    let messageType: 'text' | 'image' | 'video' | 'audio' | 'sticker' | 'story_mention' | 'quick_reply' | 'referral' = 'text';
-    
-    if (msg.message.quick_reply) {
-      messageType = 'quick_reply';
-    } else if (msg.message.referral) {
-      messageType = 'referral';
-    } else if (msg.message.reply_to?.story) {
-      messageType = 'story_mention';
-    } else if (msg.message.attachments?.length > 0) {
-      const attachmentType = msg.message.attachments[0].type;
-      if (['image', 'video', 'audio'].includes(attachmentType)) {
-        messageType = attachmentType;
-      } else if (attachmentType === 'like_heart') {
-        messageType = 'sticker';
+    // ✅ Invia al backend IVOT
+    try {
+      console.log('[PROCESSOR:MSG] 📤 Forwarding to IVOT backend...');
+      
+      const payload = {
+        instagram_account_id: instagramAccountId,
+        sender_id: msg.sender.id,
+        sender_username: msg.sender.username,
+        message: {
+          id: msg.message.mid,
+          text: msg.message.text,
+          timestamp: msg.timestamp
+        },
+        is_echo: msg.message.is_echo || msg.message.is_self || false
+      };
+
+      console.log('[PROCESSOR:MSG]    Payload:', JSON.stringify(payload, null, 2));
+
+      const response = await axios.post(
+        `${process.env.IVOT_FRONTEND_URL}/api/webhooks/instagram/messages`,
+        payload,
+        {
+          headers: {
+            'X-Api-Key': INTERNAL_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          timeout: 5000
+        }
+      );
+
+      console.log('[PROCESSOR:MSG] ✅ Forwarded to IVOT backend:', response.status);
+
+    } catch (error) {
+      console.error('[PROCESSOR:MSG] ❌ Error forwarding to IVOT:', error);
+      
+      if (axios.isAxiosError(error)) {
+        console.error('[PROCESSOR:MSG]    Status:', error.response?.status);
+        console.error('[PROCESSOR:MSG]    Data:', error.response?.data);
       }
     }
-
-    // Crea payload per IVOT
-    const payload = {
-      instagram_account_id: instagramAccountId,
-      sender_id: msg.sender.id,
-      sender_username: msg.sender.username,
-      conversation_id: `${instagramAccountId}_${msg.sender.id}`, // Crea ID conversazione unico
-      
-      message: {
-        id: msg.message.mid,
-        text: msg.message.text,
-        attachments: msg.message.attachments?.map((att: any) => ({
-          type: att.type,
-          url: att.payload?.url,
-          payload: att.payload
-        })),
-        timestamp: msg.timestamp,
-        type: messageType,
-        
-        // Campi speciali
-        quick_reply: msg.message.quick_reply,
-        referral: msg.message.referral,
-        reply_to: msg.message.reply_to,
-      },
-      
-      is_echo: msg.message.is_echo || false,
-      is_deleted: msg.message.is_deleted || false,
-      is_unsupported: msg.message.is_unsupported || false,
-      
-      webhook_event_type: 'message',
-      webhook_received_at: new Date().toISOString(),
-      instagram_webhook_time: webhookTime
-    };
-
-    // 🚀 Invia a IVOT
-    await IvotNotifier.notifyMessage(payload);
   }
 
-  // ==========================================
-  // 2. MESSAGE REACTION
-  // ==========================================
+  // Reaction
   if (msg.reaction) {
-    console.log('❤️ Reaction event:', {
+    console.log('[PROCESSOR:MSG] ❤️ Reaction:', {
       messageId: msg.reaction.mid,
       action: msg.reaction.action,
       emoji: msg.reaction.emoji
     });
-
-    const payload = {
-      instagram_account_id: instagramAccountId,
-      sender_id: msg.sender.id,
-      conversation_id: `${instagramAccountId}_${msg.sender.id}`,
-      
-      message: {
-        id: msg.reaction.mid,
-        timestamp: msg.timestamp,
-        type: 'reaction' as const,
-        text: undefined,
-        attachments: undefined,
-      },
-      
-      reaction: {
-        action: msg.reaction.action, // 'react' | 'unreact'
-        emoji: msg.reaction.emoji,
-        reaction_type: msg.reaction.reaction // 'love'
-      },
-      
-      is_echo: false,
-      is_deleted: false,
-      is_unsupported: false,
-      
-      webhook_event_type: 'message_reaction',
-      webhook_received_at: new Date().toISOString(),
-      instagram_webhook_time: webhookTime
-    };
-
-    await IvotNotifier.notifyMessage(payload);
+    
+    // TODO: Invia reaction a IVOT
   }
 
-  // ==========================================
-  // 3. MESSAGE READ (SEEN)
-  // ==========================================
+  // Message read
   if (msg.read) {
-    console.log('👁️ Message read:', {
-      messageId: msg.read.mid,
-      readBy: msg.sender.id
-    });
-
-    // Opzionale: puoi notificare IVOT che un messaggio è stato letto
-    await IvotNotifier.notifyGenericEvent(
-      'message_seen',
-      instagramAccountId,
-      {
-        message_id: msg.read.mid,
-        seen_by: msg.sender.id,
-        timestamp: msg.timestamp
-      }
-    );
+    console.log('[PROCESSOR:MSG] 👁️ Message read:', msg.read.mid);
+    
+    // TODO: Invia read status a IVOT
   }
 
-  // ==========================================
-  // 4. POSTBACK (Icebreaker o CTA button)
-  // ==========================================
+  // Postback (icebreaker, CTA button)
   if (msg.postback) {
-    console.log('🔘 Postback event:', {
+    console.log('[PROCESSOR:MSG] 🔘 Postback:', {
       title: msg.postback.title,
       payload: msg.postback.payload
     });
-
-    const payload = {
-      instagram_account_id: instagramAccountId,
-      sender_id: msg.sender.id,
-      conversation_id: `${instagramAccountId}_${msg.sender.id}`,
-      
-      message: {
-        id: msg.postback.mid,
-        timestamp: msg.timestamp,
-        type: 'postback' as const,
-        text: msg.postback.title,
-        attachments: undefined,
-      },
-      
-      postback: {
-        title: msg.postback.title,
-        payload: msg.postback.payload
-      },
-      
-      is_echo: false,
-      is_deleted: false,
-      is_unsupported: false,
-      
-      webhook_event_type: 'postback',
-      webhook_received_at: new Date().toISOString(),
-      instagram_webhook_time: webhookTime
-    };
-
-    await IvotNotifier.notifyMessage(payload);
-  }
-
-  // ==========================================
-  // 5. REFERRAL (ig.me link click)
-  // ==========================================
-  if (msg.referral && !msg.message) {
-    console.log('🔗 Referral event:', {
-      ref: msg.referral.ref,
-      source: msg.referral.source
-    });
-
-    await IvotNotifier.notifyGenericEvent(
-      'referral',
-      instagramAccountId,
-      {
-        sender_id: msg.sender.id,
-        ref: msg.referral.ref,
-        source: msg.referral.source,
-        type: msg.referral.type,
-        timestamp: msg.timestamp
-      }
-    );
-  }
-
-  // ==========================================
-  // 6. MESSAGE EDIT
-  // ==========================================
-  if (msg.message_edit) {
-    console.log('✏️ Message edit:', {
-      messageId: msg.message_edit.mid,
-      newText: msg.message_edit.text,
-      editCount: msg.message_edit.num_edit
-    });
-
-    await IvotNotifier.notifyGenericEvent(
-      'message_edit',
-      instagramAccountId,
-      {
-        message_id: msg.message_edit.mid,
-        text: msg.message_edit.text,
-        num_edit: msg.message_edit.num_edit,
-        sender_id: msg.sender.id,
-        timestamp: msg.timestamp
-      }
-    );
+    
+    // TODO: Invia postback a IVOT
   }
 }
 
 /**
- * Processa eventi di change (comments, mentions, ecc.)
+ * Processa eventi di change (commenti, mentions, ecc.)
  */
 export async function processChangeEvent(
-  instagramAccountId: string, 
+  instagramAccountId: string,
   change: any,
   webhookTime: number
 ): Promise<void> {
-  console.log('🔄 Processing change event:', {
-    accountId: instagramAccountId,
-    field: change.field
-  });
+  console.log('[PROCESSOR:CHANGE] 🔄 Processing change event');
+  console.log('[PROCESSOR:CHANGE]    Account ID:', instagramAccountId);
+  console.log('[PROCESSOR:CHANGE]    Field:', change.field);
 
   const { field, value } = change;
 
+  // ✅ SPECIAL CASE: Test di Meta invia "messages" come change event
+  if (field === 'messages' && value?.message) {
+    console.log('[PROCESSOR:CHANGE] 📨 Detected test message in change event, forwarding...');
+    
+    // Reindirizza a processMessagingEvent
+    await processMessagingEvent(
+      instagramAccountId,
+      {
+        sender: value.sender,
+        recipient: value.recipient,
+        timestamp: value.timestamp,
+        message: value.message
+      },
+      webhookTime
+    );
+    return;
+  }
+
   switch (field) {
-    // ==========================================
-    // COMMENTS & LIVE COMMENTS
-    // ==========================================
     case 'comments':
     case 'live_comments':
-      console.log(`💬 ${field === 'live_comments' ? 'Live ' : ''}Comment:`, {
-        commentId: value.id || value.comment_id,
+      console.log('[PROCESSOR:CHANGE] 💬 Comment:', {
+        commentId: value.id,
         from: value.from?.username,
         text: value.text,
         mediaId: value.media?.id
       });
 
-      await IvotNotifier.notifyComment({
-        instagram_account_id: instagramAccountId,
-        comment_id: value.id || value.comment_id,
-        media_id: value.media?.id || value.media_id,
-        from_username: value.from?.username,
-        from_id: value.from?.id,
-        text: value.text,
-        parent_comment_id: value.parent_id,
-        webhook_event_type: field === 'live_comments' ? 'live_comment' : 'comment',
-        webhook_received_at: new Date().toISOString()
+      // TODO: Invia a IVOT
+      await notifyIvotEvent('comment', instagramAccountId, {
+        field,
+        value,
+        webhook_time: webhookTime
       });
       break;
 
-    // ==========================================
-    // MENTIONS
-    // ==========================================
     case 'mentions':
-      console.log('📢 Mention:', {
+      console.log('[PROCESSOR:CHANGE] 📢 Mention:', {
         mediaId: value.media_id,
         commentId: value.comment_id
       });
 
-      await IvotNotifier.notifyGenericEvent(
-        'mention',
-        instagramAccountId,
-        {
-          media_id: value.media_id,
-          comment_id: value.comment_id,
-          webhook_time: webhookTime
-        }
-      );
+      // TODO: Invia a IVOT
+      await notifyIvotEvent('mention', instagramAccountId, {
+        field,
+        value,
+        webhook_time: webhookTime
+      });
       break;
 
-    // ==========================================
-    // STORY INSIGHTS
-    // ==========================================
     case 'story_insights':
-      console.log('📊 Story insights:', value);
-
-      await IvotNotifier.notifyGenericEvent(
-        'story_insights',
-        instagramAccountId,
-        {
-          ...value,
-          webhook_time: webhookTime
-        }
-      );
+      console.log('[PROCESSOR:CHANGE] 📊 Story insights:', value);
+      
+      // TODO: Invia a IVOT
+      await notifyIvotEvent('story_insights', instagramAccountId, {
+        field,
+        value,
+        webhook_time: webhookTime
+      });
       break;
 
-    // ==========================================
-    // UNKNOWN FIELD
-    // ==========================================
     default:
-      console.log('❓ Unknown webhook field:', field);
+      console.log('[PROCESSOR:CHANGE] ❓ Unknown field:', field);
       
-      // Invia comunque a IVOT per logging
-      await IvotNotifier.notifyGenericEvent(
-        `unknown_${field}`,
-        instagramAccountId,
-        {
-          field,
-          value,
-          webhook_time: webhookTime
-        }
-      );
+      // Invia come evento generico
+      await notifyIvotEvent(`unknown_${field}`, instagramAccountId, {
+        field,
+        value,
+        webhook_time: webhookTime
+      });
+  }
+}
+
+/**
+ * Notifica IVOT di un evento generico
+ */
+async function notifyIvotEvent(
+  eventType: string,
+  instagramAccountId: string,
+  data: any
+): Promise<void> {
+  try {
+    console.log('[PROCESSOR] 📤 Sending', eventType, 'to IVOT');
+
+    await axios.post(
+      `${IVOT_BACKEND_URL}/api/webhooks/instagram/events`,
+      {
+        event_type: eventType,
+        instagram_account_id: instagramAccountId,
+        data,
+        received_at: new Date().toISOString()
+      },
+      {
+        headers: {
+          'X-Api-Key': INTERNAL_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      }
+    );
+
+    console.log('[PROCESSOR] ✅', eventType, 'sent to IVOT');
+
+  } catch (error) {
+    console.error('[PROCESSOR] ❌ Failed to notify IVOT', eventType, ':', error);
+    
+    if (axios.isAxiosError(error)) {
+      console.error('[PROCESSOR]    Status:', error.response?.status);
+      console.error('[PROCESSOR]    Data:', error.response?.data);
+    }
   }
 }
