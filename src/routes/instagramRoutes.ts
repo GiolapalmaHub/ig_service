@@ -273,33 +273,34 @@ router.post('/webhooks', async (req: Request, res: Response) => {
 
     // Process each entry
     for (const item of entry) {
-      const instagramAccountId = item.id;
+      console.log('[WEBHOOK] ➡️ Processing entry:', JSON.stringify(item, null, 2));
+      const itemId = item.id;
       const webhookTime = item.time;
 
-      console.log(`[WEBHOOK] 📱 Processing entry for account: ${instagramAccountId}`);
+      console.log(`[WEBHOOK] 📱 Processing entry for account: ${itemId}`);
 
-      // Processa messaggi
+      // ✅ Processa eventi change (include messaggi, commenti, mentions)
+      if (item.changes && Array.isArray(item.changes)) {
+        console.log(`[WEBHOOK] 🔄 Found ${item.changes.length} change event(s)`);
+        
+        for (const change of item.changes) {
+          await processChangeEvent(change, webhookTime);
+        }
+      }
+
+      // ✅ Processa messaggi diretti (formato alternativo - raramente usato)
       if (item.messaging && Array.isArray(item.messaging)) {
-        console.log(`[WEBHOOK] 💬 Found ${item.messaging.length} messaging event(s)`);
+        console.log(`[WEBHOOK] 💬 Found ${item.messaging.length} direct messaging event(s)`);
         
         for (const msg of item.messaging) {
-          console.log('[WEBHOOK] 📨 Processing message:', {
+          console.log('[WEBHOOK] 📨 Processing direct message:', {
             sender: msg.sender?.id,
             recipient: msg.recipient?.id,
             hasMessage: !!msg.message,
             hasReaction: !!msg.reaction
           });
           
-          await processMessagingEvent(instagramAccountId, msg, webhookTime);
-        }
-      }
-
-      // Processa commenti/mentions
-      if (item.changes && Array.isArray(item.changes)) {
-        console.log(`[WEBHOOK] 🔄 Found ${item.changes.length} change event(s)`);
-        
-        for (const change of item.changes) {
-          await processChangeEvent(instagramAccountId, change, webhookTime);
+          await processMessagingEvent(itemId, msg, webhookTime);
         }
       }
     }

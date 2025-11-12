@@ -1,16 +1,24 @@
+// src/utils/webhookProcessors.ts
+
 import axios from 'axios';
 
 const IVOT_BACKEND_URL = process.env.IVOT_FRONTEND_URL
-const INTERNAL_API_KEY = process.env.ENCRYPTION_KEY;
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
 
 /**
  * Processa eventi di messaging (Direct Messages)
  */
 export async function processMessagingEvent(
-  instagramAccountId: string,
-  msg: any,
+  accountIdentifier: any, 
+  msg: { sender: any; recipient: any; timestamp: any; message?: any; reaction?: any; read?: any; postback?: any; }, 
   webhookTime: number
-): Promise<void> {
+  ): Promise<void> {  
+    
+  const instagramAccountId = accountIdentifier?.id || // Per la chiamata di TEST
+                           (typeof accountIdentifier === 'string' ? accountIdentifier : null) || // Per la chiamata REALE (da instagramRoutes)
+                           msg.recipient?.id || // Fallback
+                           'unknown_account';
+
   console.log('[PROCESSOR:MSG] 💬 Processing messaging event');
   console.log('[PROCESSOR:MSG]    Account ID:', instagramAccountId);
   console.log('[PROCESSOR:MSG]    Sender:', msg.sender?.id);
@@ -20,6 +28,7 @@ export async function processMessagingEvent(
   // Message received
   if (msg.message) {
     console.log('[PROCESSOR:MSG] 📨 Message received:', {
+    
       mid: msg.message.mid,
       text: msg.message.text,
       isDeleted: msg.message.is_deleted,
@@ -31,16 +40,20 @@ export async function processMessagingEvent(
     try {
       console.log('[PROCESSOR:MSG] 📤 Forwarding to IVOT backend...');
       
+      // ✅ Payload corretto secondo formato Meta webhook
       const payload = {
         instagram_account_id: instagramAccountId,
-        sender_id: msg.sender.id,
-        sender_username: msg.sender.username,
+        sender_id: msg.sender?.id || 'unknown',
+        sender_username: msg.sender?.username || null, // Può essere null nei test
         message: {
           id: msg.message.mid,
-          text: msg.message.text,
-          timestamp: msg.timestamp
+          text: msg.message.text || '',
+          timestamp: parseInt(msg.timestamp) || Date.now()
         },
-        is_echo: msg.message.is_echo || msg.message.is_self || false
+        is_echo: msg.message.is_echo || msg.message.is_self || false,
+        // Metadata aggiuntivi per debug
+        raw_timestamp: msg.timestamp,
+        webhook_time: webhookTime
       };
 
       console.log('[PROCESSOR:MSG]    Payload:', JSON.stringify(payload, null, 2));
@@ -50,7 +63,7 @@ export async function processMessagingEvent(
         payload,
         {
           headers: {
-            'X-Api-Key': INTERNAL_API_KEY,
+            'x-api-key': INTERNAL_API_KEY,
             'Content-Type': 'application/json'
           },
           timeout: 5000
@@ -102,12 +115,37 @@ export async function processMessagingEvent(
  * Processa eventi di change (commenti, mentions, ecc.)
  */
 export async function processChangeEvent(
-  instagramAccountId: string,
   change: any,
   webhookTime: number
 ): Promise<void> {
+
+  /*
+    [WEBHOOK] ➡️ Processing entry: {
+  "id": "0",
+  "time": 1762941285,
+  "changes": [
+    {
+      "field": "messages",
+      "value": {
+        "sender": {
+          "id": "12334"
+        },
+        "recipient": {
+          "id": "23245"
+        },
+        "timestamp": "1527459824",
+        "message": {
+          "mid": "random_mid",
+          "text": "random_text"
+        }
+      }
+    }
+  ]
+}
+  
+  */
+
   console.log('[PROCESSOR:CHANGE] 🔄 Processing change event');
-  console.log('[PROCESSOR:CHANGE]    Account ID:', instagramAccountId);
   console.log('[PROCESSOR:CHANGE]    Field:', change.field);
 
   const { field, value } = change;
@@ -116,15 +154,11 @@ export async function processChangeEvent(
   if (field === 'messages' && value?.message) {
     console.log('[PROCESSOR:CHANGE] 📨 Detected test message in change event, forwarding...');
     
-    // Reindirizza a processMessagingEvent
+
+    // Reindirizza a processMessagingEvent con struttura corretta
     await processMessagingEvent(
-      instagramAccountId,
-      {
-        sender: value.sender,
-        recipient: value.recipient,
-        timestamp: value.timestamp,
-        message: value.message
-      },
+      value.recipient, // 1° arg (accountIdentifier)
+      value,           // 2° arg (msg) - l'intero oggetto 'value'
       webhookTime
     );
     return;
@@ -140,8 +174,7 @@ export async function processChangeEvent(
         mediaId: value.media?.id
       });
 
-      // TODO: Invia a IVOT
-      await notifyIvotEvent('comment', instagramAccountId, {
+      await notifyIvotEvent('comment', value.recipient, {
         field,
         value,
         webhook_time: webhookTime
@@ -154,8 +187,7 @@ export async function processChangeEvent(
         commentId: value.comment_id
       });
 
-      // TODO: Invia a IVOT
-      await notifyIvotEvent('mention', instagramAccountId, {
+      await notifyIvotEvent('mention', value.recipient, {
         field,
         value,
         webhook_time: webhookTime
@@ -165,8 +197,7 @@ export async function processChangeEvent(
     case 'story_insights':
       console.log('[PROCESSOR:CHANGE] 📊 Story insights:', value);
       
-      // TODO: Invia a IVOT
-      await notifyIvotEvent('story_insights', instagramAccountId, {
+      await notifyIvotEvent('story_insights', value.recipient, {
         field,
         value,
         webhook_time: webhookTime
@@ -176,8 +207,7 @@ export async function processChangeEvent(
     default:
       console.log('[PROCESSOR:CHANGE] ❓ Unknown field:', field);
       
-      // Invia come evento generico
-      await notifyIvotEvent(`unknown_${field}`, instagramAccountId, {
+      await notifyIvotEvent(`unknown_${field}`, value.recipient, {
         field,
         value,
         webhook_time: webhookTime
@@ -206,7 +236,7 @@ async function notifyIvotEvent(
       },
       {
         headers: {
-          'X-Api-Key': INTERNAL_API_KEY,
+          'x-api-key': INTERNAL_API_KEY, // ← lowercase!
           'Content-Type': 'application/json'
         },
         timeout: 10000
